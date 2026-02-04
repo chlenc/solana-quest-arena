@@ -1,0 +1,15 @@
+# deps
+node_modules/
+
+# next
+.next/
+out/
+
+# env
+.env*
+
+# misc
+.DS_Store
+
+# secrets
+secrets/
