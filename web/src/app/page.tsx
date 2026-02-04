@@ -1,11 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
-import { mulberry32 } from "@/lib/rng";
+import { useEffect, useMemo, useState } from "react";
 import { createInitialState, mergeAt, spawnRandom } from "@/lib/gameEngine";
 import { GRID_SIZE } from "@/lib/gameTypes";
 import { tierLabel } from "@/lib/items";
+import { mulberry32 } from "@/lib/rng";
+import { applyEnergyRegen, msToNextEnergy } from "@/lib/energy";
+import { computeProgression } from "@/lib/progression";
+import { loadPersisted, resetPersisted, savePersisted, type Persisted } from "@/lib/storage";
 
 function Glow() {
   return (
@@ -33,8 +36,72 @@ function cellBg(tier: number) {
   return colors[tier] ?? colors[0];
 }
 
+function formatMmSs(ms: number) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const mm = String(Math.floor(s / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+function defaultPersisted(): Persisted {
+  return {
+    state: createInitialState(),
+    lastEnergyAtMs: Date.now(),
+    adventOpenedDays: {},
+    badges: {},
+  };
+}
+
 export default function Home() {
-  const [state, setState] = useState(() => createInitialState());
+  // Load from localStorage lazily (client component)
+  const [persisted, setPersisted] = useState<Persisted>(() => loadPersisted() ?? defaultPersisted());
+
+  const state = persisted.state;
+  const prog = computeProgression(state.xp);
+
+  // Drive UI time + energy regen with a lightweight interval.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => {
+      const now = Date.now();
+      setNowMs(now);
+
+      setPersisted((p) => {
+        const prog2 = computeProgression(p.state.xp);
+        const regen = applyEnergyRegen({
+          energy: p.state.energy,
+          energyCap: prog2.energyCap,
+          lastEnergyAtMs: p.lastEnergyAtMs,
+          nowMs: now,
+        });
+
+        if (
+          regen.energy === p.state.energy &&
+          regen.lastEnergyAtMs === p.lastEnergyAtMs &&
+          prog2.level === p.state.level &&
+          prog2.energyCap === p.state.energyCap
+        ) {
+          return p;
+        }
+
+        const next: Persisted = {
+          ...p,
+          lastEnergyAtMs: regen.lastEnergyAtMs,
+          state: {
+            ...p.state,
+            energy: regen.energy,
+            level: prog2.level,
+            energyCap: prog2.energyCap,
+          },
+        };
+        savePersisted(next);
+        return next;
+      });
+    }, 1000);
+
+    return () => clearInterval(t);
+  }, []);
+
   const [seed, setSeed] = useState(1337);
   const rng = useMemo(() => mulberry32(seed), [seed]);
 
@@ -43,7 +110,31 @@ export default function Home() {
 
   function flash(msg: string) {
     setToast(msg);
-    setTimeout(() => setToast(null), 1600);
+    setTimeout(() => setToast(null), 1500);
+  }
+
+  const nextEnergyIn = msToNextEnergy(nowMs, persisted.lastEnergyAtMs);
+
+  function doSpawn() {
+    const res = spawnRandom(state, rng);
+    if (res.next === state) {
+      flash("No spawn (need energy or empty space)");
+      return;
+    }
+
+    const next: Persisted = {
+      ...persisted,
+      state: {
+        ...res.next,
+        level: prog.level,
+        energyCap: prog.energyCap,
+      },
+    };
+    setPersisted(next);
+    savePersisted(next);
+
+    setSeed((s) => s + 1);
+    flash("Spawned!");
   }
 
   function onCellClick(i: number) {
@@ -58,25 +149,35 @@ export default function Home() {
 
     const res = mergeAt(state, selected, i);
     if (res.next === state) {
-      // invalid merge, just change selection
       setSelected(i);
       return;
     }
-    setState(res.next);
+
+    const prog2 = computeProgression(res.next.xp);
+    const next: Persisted = {
+      ...persisted,
+      state: {
+        ...res.next,
+        level: prog2.level,
+        energyCap: prog2.energyCap,
+      },
+    };
+
+    setPersisted(next);
+    savePersisted(next);
+
     setSelected(null);
-    if (res.spawnedLegendary) flash("Legendary triggered! (stub)");
+    if (res.spawnedLegendary) flash("Legendary triggered! (soon)");
     else flash(`+${res.gainedXp} XP`);
   }
 
-  function doSpawn() {
-    const res = spawnRandom(state, rng);
-    setState(res.next);
-    setSeed((s) => s + 1);
-    if (res.next === state) {
-      flash("No spawn (need energy or empty space)");
-    } else {
-      flash("Spawned! +1 XP");
-    }
+  function resetAll() {
+    resetPersisted();
+    const fresh = defaultPersisted();
+    setPersisted(fresh);
+    savePersisted(fresh);
+    setSelected(null);
+    flash("Reset");
   }
 
   return (
@@ -103,14 +204,14 @@ export default function Home() {
             <div>
               <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs text-white/70">
                 <span className="h-2 w-2 rounded-full bg-[#14F195]" />
-                MVP prototype · merge grid + energy + XP
+                MVP in progress · energy regen + levels
               </div>
 
               <h1 className="mt-5 text-4xl font-semibold tracking-tight">
                 Merge. Level up. Chase legendaries.
               </h1>
               <p className="mt-3 text-sm text-white/70">
-                This is a local prototype. On-chain sync + quests + advent are next.
+                Energy regenerates automatically (1 per 5 min). Progress persists in your browser.
               </p>
 
               <div id="play" className="mt-8">
@@ -122,9 +223,14 @@ export default function Home() {
                     Spawn (cost 5 energy)
                   </button>
                   <div className="text-sm text-white/70">
-                    Energy: <span className="text-white">{state.energy}</span>/{state.energyCap}
+                    Level: <span className="text-white">{prog.level}</span>
+                    <span className="mx-3 text-white/20">|</span>
+                    Energy: <span className="text-white">{state.energy}</span>/{prog.energyCap}
                     <span className="mx-3 text-white/20">|</span>
                     XP: <span className="text-white">{state.xp}</span>
+                  </div>
+                  <div className="text-xs text-white/50">
+                    Next energy in: <span className="text-white/80">{formatMmSs(nextEnergyIn)}</span>
                   </div>
                 </div>
 
@@ -142,54 +248,52 @@ export default function Home() {
                         }
                       >
                         {cell ? (
-                          <div
-                            className={
-                              "flex h-full flex-col justify-between rounded-xl bg-gradient-to-br p-2 " +
-                              cellBg(cell.tier)
-                            }
-                          >
+                          <div className={"flex h-full flex-col justify-between rounded-xl bg-gradient-to-br p-2 " + cellBg(cell.tier)}>
                             <div className="text-xs text-white/70">Tier {cell.tier}</div>
                             <div className="text-sm font-semibold">{tierLabel(cell.tier)}</div>
                           </div>
                         ) : (
-                          <div className="flex h-full items-center justify-center text-xs text-white/20">
-                            empty
-                          </div>
+                          <div className="flex h-full items-center justify-center text-xs text-white/20">empty</div>
                         )}
-                        <div className="pointer-events-none absolute inset-0 rounded-2xl opacity-0 transition group-hover:opacity-100" />
                       </button>
                     );
                   })}
                 </div>
 
-                {toast ? (
-                  <div className="mt-4 inline-flex rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs text-white/80">
-                    {toast}
-                  </div>
-                ) : null}
+                <div className="mt-4 flex items-center gap-3">
+                  {toast ? (
+                    <div className="inline-flex rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs text-white/80">
+                      {toast}
+                    </div>
+                  ) : null}
+
+                  <button
+                    onClick={resetAll}
+                    className="rounded-full border border-white/15 bg-white/5 px-4 py-2 text-xs text-white/70 hover:bg-white/10"
+                  >
+                    Reset
+                  </button>
+                </div>
               </div>
             </div>
 
             <aside className="space-y-4">
               <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
-                <div className="text-sm font-semibold">How to play (prototype)</div>
+                <div className="text-sm font-semibold">How to play (current)</div>
                 <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-white/70">
-                  <li>Click Spawn to place a tier-0 item.</li>
+                  <li>Spawn places a tier-0 item (costs energy).</li>
                   <li>Select a cell, then click another cell to merge.</li>
                   <li>Only identical tiers merge.</li>
-                  <li>Ring+Ring triggers a Legendary (stub).</li>
+                  <li>Ring+Ring triggers a Legendary (coming next).</li>
                 </ul>
               </div>
 
-              <div
-                id="roadmap"
-                className="rounded-2xl border border-white/10 bg-white/[0.04] p-5"
-              >
+              <div id="roadmap" className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
                 <div className="text-sm font-semibold">Next steps</div>
                 <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-white/70">
-                  <li>Energy regen timer + cap growth by level</li>
-                  <li>Quest system + advent 15 days</li>
-                  <li>Legendary giftboxes → badges</li>
+                  <li>Legendary items + badges</li>
+                  <li>Advent 15 days + memes (share to X)</li>
+                  <li>Quests</li>
                   <li>Referrals unlock bottom row slots</li>
                 </ol>
               </div>
