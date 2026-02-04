@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { mulberry32 } from "@/lib/rng";
 import { createInitialState, mergeAt, spawnRandom } from "@/lib/gameEngine";
 import { GRID_SIZE } from "@/lib/gameTypes";
-import { tierLabel } from "@/lib/items";
+import { tierIcon, tierLabel } from "@/lib/items";
 
 function Glow() {
   return (
@@ -148,8 +148,20 @@ export default function Home() {
                               cellBg(cell.tier)
                             }
                           >
-                            <div className="text-xs text-white/70">Tier {cell.tier}</div>
-                            <div className="text-sm font-semibold">{tierLabel(cell.tier)}</div>
+                            <div className="flex items-center gap-2">
+                              {tierIcon(cell.tier) ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={tierIcon(cell.tier)}
+                                  alt=""
+                                  className="h-8 w-8 opacity-90"
+                                />
+                              ) : null}
+                              <div className="min-w-0">
+                                <div className="text-xs text-white/70">Tier {cell.tier}</div>
+                                <div className="truncate text-sm font-semibold">{tierLabel(cell.tier)}</div>
+                              </div>
+                            </div>
                           </div>
                         ) : (
                           <div className="flex h-full items-center justify-center text-xs text-white/20">
